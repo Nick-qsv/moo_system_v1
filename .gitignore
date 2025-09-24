@@ -1,0 +1,7 @@
+# Rust / Cargo
+/target/
+/Cargo.lock
+
+# ink! / cargo-contract extra outputs
+*.contract
+*.wasm

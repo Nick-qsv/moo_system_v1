@@ -1,140 +1,165 @@
-#![cfg_attr(not(feature = "std"), no_std, no_main)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[ink::contract]
 mod moo {
+    use ink::storage::Mapping;
 
-    /// Defines the storage of your contract.
-    /// Add new fields to the below struct in order
-    /// to add new static storage fields to your contract.
+    pub type Result<T> = core::result::Result<T, Error>;
+
+    #[derive(scale::Encode, scale::Decode, Debug, PartialEq, Eq)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub enum Error {
+        AmountZero,
+        InsufficientBalance,
+        InsufficientAllowance,
+        Overflow,
+        SameAccount,
+    }
+
+    #[ink(event)]
+    pub struct Transferred {
+        #[ink(topic)]
+        from_acc: AccountId,
+        #[ink(topic)]
+        to_acc: AccountId,
+        amount: Balance,
+    }
+
+    #[ink(event)]
+    pub struct Minted {
+        #[ink(topic)]
+        to_acc: AccountId,
+        amount: Balance,
+    }
+
+    #[ink(event)]
+    pub struct Approved {
+        #[ink(topic)]
+        owner_acc: AccountId,
+        #[ink(topic)]
+        spender_acc: AccountId,
+        amount: Balance,
+    }
+
     #[ink(storage)]
     pub struct Moo {
-        /// Stores a single `bool` value on the storage.
-        value: bool,
+        total_supply: Balance,
+        balances: Mapping<AccountId, Balance>,
+        allowances: Mapping<(AccountId, AccountId), Balance>,
     }
 
     impl Moo {
-        /// Constructor that initializes the `bool` value to the given `init_value`.
         #[ink(constructor)]
-        pub fn new(init_value: bool) -> Self {
-            Self { value: init_value }
+        pub fn new() -> Self {
+            Self {
+                total_supply: 0,
+                balances: Mapping::default(),
+                allowances: Mapping::default(),
+            }
         }
 
-        /// Constructor that initializes the `bool` value to `false`.
-        ///
-        /// Constructors can delegate to other constructors.
-        #[ink(constructor)]
-        pub fn default() -> Self {
-            Self::new(Default::default())
-        }
-
-        /// A message that can be called on instantiated contracts.
-        /// This one flips the value of the stored `bool` from `true`
-        /// to `false` and vice versa.
         #[ink(message)]
-        pub fn flip(&mut self) {
-            self.value = !self.value;
+        pub fn total_supply(&self) -> Balance {
+            self.total_supply
         }
 
-        /// Simply returns the current value of our `bool`.
         #[ink(message)]
-        pub fn get(&self) -> bool {
-            self.value
-        }
-    }
-
-    /// Unit tests in Rust are normally defined within such a `#[cfg(test)]`
-    /// module and test functions are marked with a `#[test]` attribute.
-    /// The below code is technically just normal Rust code.
-    #[cfg(test)]
-    mod tests {
-        /// Imports all the definitions from the outer scope so we can use them here.
-        use super::*;
-
-        /// We test if the default constructor does its job.
-        #[ink::test]
-        fn default_works() {
-            let moo = Moo::default();
-            assert_eq!(moo.get(), false);
+        pub fn balance_of(&self, owner_acc: AccountId) -> Balance {
+            self.balances.get(&owner_acc).unwrap_or(0)
         }
 
-        /// We test a simple use case of our contract.
-        #[ink::test]
-        fn it_works() {
-            let mut moo = Moo::new(false);
-            assert_eq!(moo.get(), false);
-            moo.flip();
-            assert_eq!(moo.get(), true);
+        #[ink(message)]
+        pub fn my_balance(&self) -> Balance {
+            let caller_acc = self.env().caller();
+            self.balance_of(caller_acc)
         }
-    }
 
+        #[ink(message)]
+        pub fn mint(&mut self, amount: Balance) -> Result<()> {
+            if amount == 0 {
+                return Err(Error::AmountZero)
+            }
+            let caller_acc = self.env().caller();
+            self.mint_internal(caller_acc, amount)
+        }
 
-    /// This is how you'd write end-to-end (E2E) or integration tests for ink! contracts.
-    ///
-    /// When running these you need to make sure that you:
-    /// - Compile the tests with the `e2e-tests` feature flag enabled (`--features e2e-tests`)
-    /// - Are running a Substrate node which contains `pallet-contracts` in the background
-    #[cfg(all(test, feature = "e2e-tests"))]
-    mod e2e_tests {
-        /// Imports all the definitions from the outer scope so we can use them here.
-        use super::*;
+        #[ink(message)]
+        pub fn transfer(&mut self, to_acc: AccountId, amount: Balance) -> Result<()> {
+            if amount == 0 {
+                return Err(Error::AmountZero)
+            }
+            let from_acc = self.env().caller();
+            if from_acc == to_acc {
+                return Err(Error::SameAccount)
+            }
+            self.move_balance(from_acc, to_acc, amount)
+        }
 
-        /// A helper function used for calling contract messages.
-        use ink_e2e::ContractsBackend;
-
-        /// The End-to-End test `Result` type.
-        type E2EResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-        /// We test that we can upload and instantiate the contract using its default constructor.
-        #[ink_e2e::test]
-        async fn default_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
-            // Given
-            let mut constructor = MooRef::default();
-
-            // When
-            let contract = client
-                .instantiate("moo", &ink_e2e::alice(), &mut constructor)
-                .submit()
-                .await
-                .expect("instantiate failed");
-            let call_builder = contract.call_builder::<Moo>();
-
-            // Then
-            let get = call_builder.get();
-            let get_result = client.call(&ink_e2e::alice(), &get).dry_run().await?;
-            assert!(matches!(get_result.return_value(), false));
-
+        #[ink(message)]
+        pub fn approve(&mut self, spender_acc: AccountId, amount: Balance) -> Result<()> {
+            let owner_acc = self.env().caller();
+            self.allowances.insert(&(owner_acc, spender_acc), &amount);
+            self.env().emit_event(Approved { owner_acc, spender_acc, amount });
             Ok(())
         }
 
-        /// We test that we can read and write a value from the on-chain contract.
-        #[ink_e2e::test]
-        async fn it_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
-            // Given
-            let mut constructor = MooRef::new(false);
-            let contract = client
-                .instantiate("moo", &ink_e2e::bob(), &mut constructor)
-                .submit()
-                .await
-                .expect("instantiate failed");
-            let mut call_builder = contract.call_builder::<Moo>();
+        #[ink(message)]
+        pub fn transfer_from(
+            &mut self,
+            from_acc: AccountId,
+            to_acc: AccountId,
+            amount: Balance,
+        ) -> Result<()> {
+            if amount == 0 {
+                return Err(Error::AmountZero)
+            }
+            if from_acc == to_acc {
+                return Err(Error::SameAccount)
+            }
 
-            let get = call_builder.get();
-            let get_result = client.call(&ink_e2e::bob(), &get).dry_run().await?;
-            assert!(matches!(get_result.return_value(), false));
+            let caller_acc = self.env().caller();
+            let mut allowance_amt = self.allowances.get(&(from_acc, caller_acc)).unwrap_or(0);
+            if allowance_amt < amount {
+                return Err(Error::InsufficientAllowance)
+            }
+            allowance_amt = allowance_amt.checked_sub(amount).ok_or(Error::Overflow)?;
+            self.allowances.insert(&(from_acc, caller_acc), &allowance_amt);
 
-            // When
-            let flip = call_builder.flip();
-            let _flip_result = client
-                .call(&ink_e2e::bob(), &flip)
-                .submit()
-                .await
-                .expect("flip failed");
+            self.move_balance(from_acc, to_acc, amount)
+        }
 
-            // Then
-            let get = call_builder.get();
-            let get_result = client.call(&ink_e2e::bob(), &get).dry_run().await?;
-            assert!(matches!(get_result.return_value(), true));
+        #[ink(message)]
+        pub fn allowance(&self, owner_acc: AccountId, spender_acc: AccountId) -> Balance {
+            self.allowances.get(&(owner_acc, spender_acc)).unwrap_or(0)
+        }
 
+        // ---- internals ----
+
+        fn mint_internal(&mut self, to_acc: AccountId, amount: Balance) -> Result<()> {
+            let new_total = self.total_supply.checked_add(amount).ok_or(Error::Overflow)?;
+            self.total_supply = new_total;
+
+            let bal = self.balances.get(&to_acc).unwrap_or(0);
+            let new_bal = bal.checked_add(amount).ok_or(Error::Overflow)?;
+            self.balances.insert(&to_acc, &new_bal);
+
+            self.env().emit_event(Minted { to_acc, amount });
+            Ok(())
+        }
+
+        fn move_balance(&mut self, from_acc: AccountId, to_acc: AccountId, amount: Balance) -> Result<()> {
+            let from_bal = self.balances.get(&from_acc).unwrap_or(0);
+            if from_bal < amount {
+                return Err(Error::InsufficientBalance)
+            }
+            let new_from = from_bal.checked_sub(amount).ok_or(Error::Overflow)?;
+            self.balances.insert(&from_acc, &new_from);
+
+            let to_bal = self.balances.get(&to_acc).unwrap_or(0);
+            let new_to = to_bal.checked_add(amount).ok_or(Error::Overflow)?;
+            self.balances.insert(&to_acc, &new_to);
+
+            self.env().emit_event(Transferred { from_acc, to_acc, amount });
             Ok(())
         }
     }

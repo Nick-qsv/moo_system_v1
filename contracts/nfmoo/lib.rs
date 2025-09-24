@@ -1,139 +1,210 @@
-#![cfg_attr(not(feature = "std"), no_std, no_main)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[ink::contract]
 mod nfmoo {
+    use ink::storage::Mapping;
+    use ink::prelude::vec::Vec;
+    use core::cmp::min;
 
-    /// Defines the storage of your contract.
-    /// Add new fields to the below struct in order
-    /// to add new static storage fields to your contract.
+    pub type TokenId = u128;
+    pub type Result<T> = core::result::Result<T, Error>;
+
+    #[derive(scale::Encode, scale::Decode, Debug, PartialEq, Eq)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub enum Error {
+        AmountZero,
+        Overflow,
+        SameAccount,
+        NotOwner,
+        TokenMissing,
+    }
+
+    #[ink(event)]
+    pub struct NFMinted {
+        #[ink(topic)]
+        to_acc: AccountId,
+        #[ink(topic)]
+        token_id: TokenId,
+    }
+
+    #[ink(event)]
+    pub struct NFTransferred {
+        #[ink(topic)]
+        from_acc: AccountId,
+        #[ink(topic)]
+        to_acc: AccountId,
+        #[ink(topic)]
+        token_id: TokenId,
+    }
+
+    #[ink(event)]
+    pub struct NFBurned {
+        #[ink(topic)]
+        from_acc: AccountId,
+        #[ink(topic)]
+        token_id: TokenId,
+    }
+
     #[ink(storage)]
-    pub struct Nfmoo {
-        /// Stores a single `bool` value on the storage.
-        value: bool,
+    pub struct NFMoo {
+        /// Next token id to assign on mint.
+        next_id: TokenId,
+
+        /// token_id -> owner_acc
+        owner_of: Mapping<TokenId, AccountId>,
+
+        /// owner_acc -> number of tokens owned
+        owned_count: Mapping<AccountId, u32>,
+
+        /// (owner_acc, index) -> token_id (for pagination/enumeration)
+        tokens_by_owner: Mapping<(AccountId, u32), TokenId>,
+
+        /// token_id -> index within owner's enumeration list
+        owned_index: Mapping<TokenId, u32>,
     }
 
-    impl Nfmoo {
-        /// Constructor that initializes the `bool` value to the given `init_value`.
+    impl NFMoo {
         #[ink(constructor)]
-        pub fn new(init_value: bool) -> Self {
-            Self { value: init_value }
+        pub fn new() -> Self {
+            Self {
+                next_id: 0,
+                owner_of: Mapping::default(),
+                owned_count: Mapping::default(),
+                tokens_by_owner: Mapping::default(),
+                owned_index: Mapping::default(),
+            }
         }
 
-        /// Constructor that initializes the `bool` value to `false`.
-        ///
-        /// Constructors can delegate to other constructors.
-        #[ink(constructor)]
-        pub fn default() -> Self {
-            Self::new(Default::default())
-        }
+        // --------- mint / burn / transfer ---------
 
-        /// A message that can be called on instantiated contracts.
-        /// This one flips the value of the stored `bool` from `true`
-        /// to `false` and vice versa.
+        /// Open mint: anyone can mint `amount` unique tokens to themselves.
         #[ink(message)]
-        pub fn flip(&mut self) {
-            self.value = !self.value;
-        }
+        pub fn mint_n(&mut self, amount: u32) -> Result<()> {
+            if amount == 0 {
+                return Err(Error::AmountZero)
+            }
+            let to_acc = self.env().caller();
+            for _ in 0..amount {
+                let token_id = self.next_id;
+                self.next_id = self.next_id.checked_add(1).ok_or(Error::Overflow)?;
 
-        /// Simply returns the current value of our `bool`.
-        #[ink(message)]
-        pub fn get(&self) -> bool {
-            self.value
-        }
-    }
-
-    /// Unit tests in Rust are normally defined within such a `#[cfg(test)]`
-    /// module and test functions are marked with a `#[test]` attribute.
-    /// The below code is technically just normal Rust code.
-    #[cfg(test)]
-    mod tests {
-        /// Imports all the definitions from the outer scope so we can use them here.
-        use super::*;
-
-        /// We test if the default constructor does its job.
-        #[ink::test]
-        fn default_works() {
-            let nfmoo = Nfmoo::default();
-            assert_eq!(nfmoo.get(), false);
-        }
-
-        /// We test a simple use case of our contract.
-        #[ink::test]
-        fn it_works() {
-            let mut nfmoo = Nfmoo::new(false);
-            assert_eq!(nfmoo.get(), false);
-            nfmoo.flip();
-            assert_eq!(nfmoo.get(), true);
-        }
-    }
-
-
-    /// This is how you'd write end-to-end (E2E) or integration tests for ink! contracts.
-    ///
-    /// When running these you need to make sure that you:
-    /// - Compile the tests with the `e2e-tests` feature flag enabled (`--features e2e-tests`)
-    /// - Are running a Substrate node which contains `pallet-contracts` in the background
-    #[cfg(all(test, feature = "e2e-tests"))]
-    mod e2e_tests {
-        /// Imports all the definitions from the outer scope so we can use them here.
-        use super::*;
-
-        /// A helper function used for calling contract messages.
-        use ink_e2e::ContractsBackend;
-
-        /// The End-to-End test `Result` type.
-        type E2EResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-        /// We test that we can upload and instantiate the contract using its default constructor.
-        #[ink_e2e::test]
-        async fn default_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
-            // Given
-            let mut constructor = NfmooRef::default();
-
-            // When
-            let contract = client
-                .instantiate("nfmoo", &ink_e2e::alice(), &mut constructor)
-                .submit()
-                .await
-                .expect("instantiate failed");
-            let call_builder = contract.call_builder::<Nfmoo>();
-
-            // Then
-            let get = call_builder.get();
-            let get_result = client.call(&ink_e2e::alice(), &get).dry_run().await?;
-            assert!(matches!(get_result.return_value(), false));
-
+                self.owner_of.insert(&token_id, &to_acc);
+                self.add_token_to_owner(to_acc, token_id)?;
+                self.env().emit_event(NFMinted { to_acc, token_id });
+            }
             Ok(())
         }
 
-        /// We test that we can read and write a value from the on-chain contract.
-        #[ink_e2e::test]
-        async fn it_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
-            // Given
-            let mut constructor = NfmooRef::new(false);
-            let contract = client
-                .instantiate("nfmoo", &ink_e2e::bob(), &mut constructor)
-                .submit()
-                .await
-                .expect("instantiate failed");
-            let mut call_builder = contract.call_builder::<Nfmoo>();
+        /// Transfer a token you own to `to_acc`.
+        #[ink(message)]
+        pub fn transfer(&mut self, to_acc: AccountId, token_id: TokenId) -> Result<()> {
+            let from_acc = self
+                .owner_of
+                .get(&token_id)
+                .ok_or(Error::TokenMissing)?;
 
-            let get = call_builder.get();
-            let get_result = client.call(&ink_e2e::bob(), &get).dry_run().await?;
-            assert!(matches!(get_result.return_value(), false));
+            if from_acc != self.env().caller() {
+                return Err(Error::NotOwner)
+            }
+            if from_acc == to_acc {
+                return Err(Error::SameAccount)
+            }
 
-            // When
-            let flip = call_builder.flip();
-            let _flip_result = client
-                .call(&ink_e2e::bob(), &flip)
-                .submit()
-                .await
-                .expect("flip failed");
+            self.remove_token_from_owner(from_acc, token_id)?;
+            self.owner_of.insert(&token_id, &to_acc);
+            self.add_token_to_owner(to_acc, token_id)?;
 
-            // Then
-            let get = call_builder.get();
-            let get_result = client.call(&ink_e2e::bob(), &get).dry_run().await?;
-            assert!(matches!(get_result.return_value(), true));
+            self.env().emit_event(NFTransferred { from_acc, to_acc, token_id });
+            Ok(())
+        }
+
+        /// Burn a token you own.
+        #[ink(message)]
+        pub fn burn(&mut self, token_id: TokenId) -> Result<()> {
+            let from_acc = self
+                .owner_of
+                .get(&token_id)
+                .ok_or(Error::TokenMissing)?;
+            if from_acc != self.env().caller() {
+                return Err(Error::NotOwner)
+            }
+
+            self.remove_token_from_owner(from_acc, token_id)?;
+            self.owner_of.remove(&token_id);
+
+            self.env().emit_event(NFBurned { from_acc, token_id });
+            Ok(())
+        }
+
+        // --------- queries ---------
+
+        /// Who owns this token?
+        #[ink(message)]
+        pub fn owner_of(&self, token_id: TokenId) -> Option<AccountId> {
+            self.owner_of.get(&token_id)
+        }
+
+        /// How many tokens does this account own?
+        #[ink(message)]
+        pub fn balance_of(&self, owner_acc: AccountId) -> u32 {
+            self.owned_count.get(&owner_acc).unwrap_or(0)
+        }
+
+        /// Paginated list of token ids owned by `owner_acc`.
+        #[ink(message)]
+        pub fn tokens_of(&self, owner_acc: AccountId, start_index: u32, limit: u32) -> Vec<TokenId> {
+            let count = self.balance_of(owner_acc);
+            if start_index >= count || limit == 0 {
+                return Vec::new();
+            }
+            let end_index = min(count, start_index.saturating_add(limit));
+            let mut list: Vec<TokenId> = Vec::new();
+            let mut idx = start_index;
+            while idx < end_index {
+                if let Some(token_id) = self.tokens_by_owner.get(&(owner_acc, idx)) {
+                    list.push(token_id);
+                }
+                idx += 1;
+            }
+            list
+        }
+
+        // --------- internals: owner sets management ---------
+
+        fn add_token_to_owner(&mut self, to_acc: AccountId, token_id: TokenId) -> Result<()> {
+            let count = self.owned_count.get(&to_acc).unwrap_or(0);
+            self.tokens_by_owner.insert(&(to_acc, count), &token_id);
+            self.owned_index.insert(&token_id, &count);
+            self.owned_count.insert(&to_acc, &(count.checked_add(1).ok_or(Error::Overflow)?));
+            Ok(())
+        }
+
+        fn remove_token_from_owner(&mut self, from_acc: AccountId, token_id: TokenId) -> Result<()> {
+            let count = self.owned_count.get(&from_acc).unwrap_or(0);
+            if count == 0 {
+                return Err(Error::TokenMissing)
+            }
+
+            // index of token to remove
+            let idx = self.owned_index.get(&token_id).ok_or(Error::TokenMissing)?;
+
+            // last token info
+            let last_idx = count - 1;
+            if let Some(last_token_id) = self.tokens_by_owner.get(&(from_acc, last_idx)) {
+                // move last token into the removed slot if not the same token
+                if last_idx != idx {
+                    self.tokens_by_owner.insert(&(from_acc, idx), &last_token_id);
+                    self.owned_index.insert(&last_token_id, &idx);
+                }
+                // clear last slot
+                self.tokens_by_owner.remove(&(from_acc, last_idx));
+            }
+
+            // clear mappings for removed token
+            self.owned_index.remove(&token_id);
+
+            // decrement count
+            self.owned_count.insert(&from_acc, &(last_idx));
 
             Ok(())
         }
